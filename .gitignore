@@ -1,0 +1,35 @@
+# OMNeT++ build files
+out/
+out-*/
+*.o
+*.so
+*.dll
+*.exe
+*.a
+
+# OMNeT++ generated message files
+*_m.cc
+*_m.h
+
+# Simulation results
+results/
+*.sca
+*.vec
+*.vci
+*.elog
+
+# IDE files
+.metadata/
+.settings/
+.cproject
+.project
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*.backup
+*.tmp
+*~
