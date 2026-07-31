@@ -1,6 +1,7 @@
 #include <omnetpp.h>
 #include <cstring>
 
+
 #include "TransportMessages_m.h"
 #include "RFC8609Messages_m.h"
 #include "inet/common/packet/Packet.h"
@@ -9,6 +10,7 @@
 #include "inet/transportlayer/contract/udp/UdpSocket.h"
 #include <sstream>
 #include <vector>
+#include <map>
 
 using namespace omnetpp;
 
@@ -20,13 +22,25 @@ class AdaptationLayer : public cSimpleModule
     inet::UdpSocket socket;
     bool socketReady = false;
 
+    std::map<std::string, int> pendingInterestNames;
+
+    int sentInterests = 0;
+    int receivedContentObjects = 0;
+    int matchedContentObjects = 0;
+    int unmatchedContentObjects = 0;
+
     void setupSocket();
     std::string serializeCcnPacket(cPacket *packet);
     cPacket *deserializeCcnPacket(const char *data);
 
+    std::string makeInterestKey(InterestMsg *interest);
+    std::string makeContentKey(ContentObjMsg *content);
+    void checkContentMatch(cPacket *packet);
+
   protected:
       virtual void initialize() override;
       virtual void handleMessage(cMessage *msg) override;
+      virtual void finish() override;
 };
 
 Define_Module(AdaptationLayer);
@@ -149,7 +163,65 @@ cPacket *AdaptationLayer::deserializeCcnPacket(const char *data)
 
     return nullptr;
 }
+std::string AdaptationLayer::makeInterestKey(InterestMsg *interest)
+{
+    std::ostringstream os;
+    os << interest->getPrefixName()
+       << "|"
+       << interest->getDataName()
+       << "|"
+       << interest->getVersionName()
+       << "|"
+       << interest->getSegmentNum();
 
+    return os.str();
+}
+
+std::string AdaptationLayer::makeContentKey(ContentObjMsg *content)
+{
+    std::ostringstream os;
+    os << content->getPrefixName()
+       << "|"
+       << content->getDataName()
+       << "|"
+       << content->getVersionName()
+       << "|"
+       << content->getSegmentNum();
+
+    return os.str();
+}
+
+void AdaptationLayer::checkContentMatch(cPacket *packet)
+{
+    auto *content = dynamic_cast<ContentObjMsg *>(packet);
+
+    if (content == nullptr)
+        return;
+
+    receivedContentObjects++;
+
+    std::string key = makeContentKey(content);
+
+    auto it = pendingInterestNames.find(key);
+
+    if (it != pendingInterestNames.end()) {
+        matchedContentObjects++;
+
+        it->second--;
+
+        if (it->second <= 0)
+            pendingInterestNames.erase(it);
+
+        EV_INFO << "MATCH VALIDATION: received ContentObj matched Interest key = "
+                << key << "\n";
+    }
+    else {
+        unmatchedContentObjects++;
+
+        EV_WARN << "MATCH VALIDATION: received unmatched ContentObj key = "
+                << key << "\n";
+    }
+}
 void AdaptationLayer::handleMessage(cMessage *msg)
 {
     if (msg->isSelfMessage()) {
@@ -188,6 +260,20 @@ void AdaptationLayer::handleMessage(cMessage *msg)
                 << ", udpMode=" << udpMode
                 << ", inetUdpMode=" << inetUdpMode
                 << "\n";
+        cPacket *checkPacket = dynamic_cast<cPacket *>(msg);
+
+        if (checkPacket != nullptr) {
+            auto *interest = dynamic_cast<InterestMsg *>(checkPacket);
+
+            if (interest != nullptr) {
+                std::string key = makeInterestKey(interest);
+                pendingInterestNames[key]++;
+                sentInterests++;
+
+                EV_INFO << "MATCH VALIDATION: stored outgoing Interest key = "
+                        << key << "\n";
+            }
+        }
 
         if (inetUdpMode) {
             setupSocket();
@@ -273,12 +359,18 @@ void AdaptationLayer::handleMessage(cMessage *msg)
 
                 delete udpWrapper;
 
+                checkContentMatch(ccnPacket);
+
                 send(ccnPacket, "forwarderInOut$o", gateIndex);
             }
             else {
                 EV_WARN << "UDP MODE: expected UdpEncapsulatedCcnMsg but received "
                         << msg->getClassName()
                         << ". Passing through unchanged.\n";
+
+                cPacket *packet = dynamic_cast<cPacket *>(msg);
+                if (packet != nullptr)
+                    checkContentMatch(packet);
 
                 send(msg, "forwarderInOut$o", gateIndex);
             }
@@ -301,6 +393,8 @@ void AdaptationLayer::handleMessage(cMessage *msg)
 
             delete inetPacket;
 
+            checkContentMatch(ccnPacket);
+
             send(ccnPacket, "forwarderInOut$o", 0);
         }
         else {
@@ -313,6 +407,20 @@ void AdaptationLayer::handleMessage(cMessage *msg)
                 << arrivalGate->getFullName() << "\n";
         delete msg;
     }
+}
+void AdaptationLayer::finish()
+{
+    EV_INFO << "MATCH VALIDATION SUMMARY: sentInterests="
+            << sentInterests
+            << ", receivedContentObjects=" << receivedContentObjects
+            << ", matchedContentObjects=" << matchedContentObjects
+            << ", unmatchedContentObjects=" << unmatchedContentObjects
+            << "\n";
+
+    recordScalar("sentInterests", sentInterests);
+    recordScalar("receivedContentObjects", receivedContentObjects);
+    recordScalar("matchedContentObjects", matchedContentObjects);
+    recordScalar("unmatchedContentObjects", unmatchedContentObjects);
 }
 } // namespace inbaversim
 
